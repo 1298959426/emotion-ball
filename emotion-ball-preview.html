@@ -1,0 +1,1334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Emotion-Ball · 圆形屏语音方向表情预览（基于 sam70361/emotion-ball 开源项目）</title>
+<!-- EmotionBall 开源库 (github.com/sam70361/emotion-ball)：rings 几何 → 表情配置 → ball 渲染 → engine 驱动 -->
+<script src="emotion-ball/js/rings.js"></script>
+<script src="emotion-ball/js/emotions.js"></script>
+<script src="emotion-ball/js/ball.js"></script>
+<script src="emotion-ball/js/engine.js"></script>
+<style>
+  :root{
+    --bg1:#0f1226;
+    --bg2:#1a1240;
+    --accent:#7cf7ff;
+    --accent2:#ff8bd2;
+    --text:#eef2ff;
+    --muted:#95a0c8;
+    --panel:rgba(255,255,255,.06);
+    --stroke:rgba(255,255,255,.14);
+    --ok:#6ef5a0;
+    --warn:#ffd66b;
+    --bad:#ff7a9a;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  /* 全局：关闭非必要混叠，让 Emotion-Ball 的 rAF 独占更多主线程 */
+  html,body{
+    backface-visibility:hidden;
+  }
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    color:var(--text);
+    background:
+      radial-gradient(1200px 600px at 10% -10%, #2a1e66 0%, transparent 60%),
+      radial-gradient(900px 500px at 110% 20%, #0c3a5e 0%, transparent 60%),
+      linear-gradient(180deg, var(--bg1), var(--bg2));
+    overflow-x:hidden;
+  }
+  .wrap{
+    max-width:1200px; margin:0 auto; padding:28px 20px 80px;
+  }
+  header h1{
+    font-size:26px; margin:0 0 6px; letter-spacing:.5px;
+  }
+  header p{margin:0;color:var(--muted);font-size:14px}
+  .grid{
+    display:grid;
+    grid-template-columns: 1.1fr 1fr;
+    gap:24px;
+    margin-top:22px;
+  }
+  @media (max-width: 960px){ .grid{grid-template-columns:1fr;} }
+
+  .card{
+    /* 用半透明替代 backdrop-filter: blur — 最吃 GPU 的合成滤镜之一 */
+    background: rgba(255,255,255,.08);
+    border:1px solid var(--stroke);
+    border-radius:18px;
+    padding:18px;
+    box-shadow:0 10px 30px rgba(0,0,0,.25);
+    /* 静止时不要让 will-change 常驻，需要动画时再加 */
+    transform: translateZ(0);
+    contain: layout paint style;
+  }
+  .card h2{
+    margin:2px 4px 14px; font-size:16px; letter-spacing:.3px;
+    display:flex; align-items:center; gap:8px;
+  }
+  .tag{
+    font-size:12px; padding:2px 8px; border-radius:999px;
+    background:rgba(124,247,255,.12); color:var(--accent);
+    border:1px solid rgba(124,247,255,.25);
+  }
+
+  /* ===== 圆形屏舞台 ===== */
+  .stage{
+    position:relative;
+    width:100%;
+    aspect-ratio: 1 / 1;
+    display:grid; place-items:center;
+  }
+  .device{
+    position:relative;
+    width:min(92%, 520px);
+    aspect-ratio:1/1;
+    border-radius:50%;
+    padding:14px;
+    background:
+      radial-gradient(120% 120% at 30% 10%, #2b3468 0%, #0e0f2b 60%, #05061a 100%);
+    box-shadow:
+      0 30px 80px rgba(0,0,0,.55),
+      inset 0 2px 0 rgba(255,255,255,.08),
+      inset 0 -20px 40px rgba(0,0,0,.55);
+  }
+  .screen{
+    position:relative;
+    width:100%; height:100%;
+    border-radius:50%;
+    overflow:hidden;
+    background:
+      radial-gradient(circle at 50% 40%, #1b255a 0%, #0b0f32 55%, #050720 100%);
+    border:1px solid rgba(255,255,255,.08);
+  }
+  /* 星河流动背景 — 默认静止，"丝滑档"才开无限动画，省电档不显示 */
+  .stars{
+    position:absolute; inset:0; border-radius:50%;
+    background-image:
+      radial-gradient(1.2px 1.2px at 20% 30%, #ffffffcc 50%, transparent 51%),
+      radial-gradient(1px 1px at 70% 20%, #ffffff99 50%, transparent 51%),
+      radial-gradient(1.6px 1.6px at 40% 75%, #7cf7ffcc 50%, transparent 51%),
+      radial-gradient(1px 1px at 85% 65%, #ffffff88 50%, transparent 51%),
+      radial-gradient(1.4px 1.4px at 10% 80%, #ff8bd2aa 50%, transparent 51%),
+      radial-gradient(1px 1px at 55% 45%, #ffffff77 50%, transparent 51%);
+    background-size: 120% 120%;
+    opacity:.5;
+    will-change: transform;
+    /* 静止版，减少 rAF 抢占 */
+    animation: none;
+  }
+  @keyframes drift{
+    0%{ transform:translate(0,0) }
+    50%{ transform:translate(-3%,2%) }
+    100%{ transform:translate(0,0) }
+  }
+  /* 流畅度档位：balance / silky / eco */
+  body.balance .stars{ animation: drift 30s linear infinite; opacity:.4; }
+  body.silky  .stars{ animation: drift 18s linear infinite; opacity:.7; }
+  body.silky  .stars::after{
+    content:""; position:absolute; inset:0; border-radius:50%;
+    background: inherit; background-position: 30% 60%;
+    animation: drift 32s linear infinite; opacity:.5; mix-blend-mode: screen;
+  }
+  body.eco .stars{ display:none; }
+
+  /* 方向指示光环 */
+  .ring{
+    position:absolute; inset:6%;
+    border-radius:50%;
+    pointer-events:none;
+    z-index: 2;
+    contain: layout paint;
+  }
+  .ring svg{ width:100%; height:100%; display:block; overflow:visible; }
+
+  /* Emotion-Ball 本体（使用开源 EmotionBall SDK 渲染） */
+  .ball-wrap{
+    position:absolute; inset:0;
+    display:grid; place-items:center;
+    z-index: 3;
+    contain: layout paint;
+  }
+  .ball-shift{
+    --tx: 0px;
+    --ty: 0px;
+    width: 60%;
+    aspect-ratio: 1/1;
+    /* 仅合成层，不做 drop-shadow 像素级混叠 —— 这是动画掉帧第一元凶 */
+    transform: translate3d(var(--tx), var(--ty), 0);
+    transition: transform .28s cubic-bezier(.22,1.1,.36,1);
+    will-change: transform;
+    backface-visibility:hidden;
+    transform-style: flat;
+    /* filter: drop-shadow(...) → 换用简单 box-shadow，合成开销降到 1/5 以下 */
+    border-radius: 50%;
+  }
+  .ball-shift::after{
+    /* 用 box-shadow 做阴影，不用 drop-shadow（后者要逐像素重算 SVG） */
+    content:"";
+    position:absolute; inset: 4% 6% 2% 6%;
+    border-radius: 50%;
+    box-shadow: 0 14px 26px rgba(0,0,0,.42);
+    pointer-events:none;
+    z-index:-1;
+  }
+  .ball-shift > #eb-render{ width:100%; height:100%; display:block; }
+
+  /* 表情 SDK 柔光：只在 silky 档用 mix-blend+radial；balance/eco 降阶 */
+  .ball-aura{
+    position:absolute; left:50%; top:50%;
+    width: 58%; aspect-ratio:1/1;
+    transform: translate(calc(-50% + var(--tx, 0px)), calc(-50% + var(--ty, 0px))) translateZ(0);
+    border-radius: 50%;
+    pointer-events:none;
+    z-index: 2;
+    transition: transform .28s cubic-bezier(.22,1.1,.36,1);
+    will-change: transform;
+    backface-visibility:hidden;
+    background: rgba(124,247,255,.06);
+    box-shadow: inset 0 0 40px rgba(124,247,255,.35);
+  }
+  body.silky .ball-aura{
+    background: radial-gradient(circle at 50% 50%, rgba(124,247,255,.22) 0%, rgba(124,247,255,0) 70%);
+    mix-blend-mode: screen;
+    box-shadow: none;
+  }
+  body.eco .ball-aura{ display:none; }
+
+  /* 摸头手掌：叠在球上方，只在 #50 被摸头时显示
+     - 位置：球顶部偏右，手指朝下
+     - 动画：1.2s 一拍 —— 下压→滑动→抬起→回位，和 SDK body.y sine 同步
+     - 性能：纯 transform + opacity，走合成层，不触发重排 */
+  .pet-hand{
+    position:absolute;
+    /* 球宽 60%，手掌宽约球的 45%，居中偏右一点 */
+    width: 27%;
+    aspect-ratio: 6/5;
+    left: 50%;
+    /* 初始位置在球顶部边缘上方（手指尖刚好碰到球顶） */
+    top: 8%;
+    transform: translate3d(-50%, -60%, 0) rotate(-15deg);
+    transform-origin: 50% 100%;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 5;
+    will-change: transform, opacity;
+    backface-visibility: hidden;
+    transition: opacity .25s ease;
+    filter: drop-shadow(0 4px 8px rgba(0,0,0,.25));
+  }
+  .pet-hand svg{ width:100%; height:100%; display:block; overflow:visible; }
+  /* 拍摸动画：1.2s 循环，和 SDK 的 sine period:1200 同步
+     0%   抬起准备（手指离球顶 15px）
+     35%  下压（手指贴住球顶，球被压下去）
+     55%  保持贴住 + 向右滑一小段
+     75%  抬起
+     100% 回到准备位 */
+  .pet-hand.show{
+    opacity: 1;
+    animation: petPat 1.2s ease-in-out infinite;
+  }
+  @keyframes petPat{
+    0%{
+      transform: translate3d(-50%, -60%, 0) rotate(-15deg) scale(1);
+    }
+    30%{
+      transform: translate3d(-50%, 0%, 0) rotate(-8deg) scale(1.02);
+    }
+    50%{
+      transform: translate3d(-45%, 2%, 0) rotate(-5deg) scale(1.03);
+    }
+    70%{
+      transform: translate3d(-48%, -10%, 0) rotate(-10deg) scale(1);
+    }
+    100%{
+      transform: translate3d(-50%, -60%, 0) rotate(-15deg) scale(1);
+    }
+  }
+  /* eco 档去掉 drop-shadow 省 GPU */
+  body.eco .pet-hand{ filter: none; }
+
+  /* 方向箭头：所有位移统一 translate3d + will-change */
+  .arrow{
+    position:absolute;
+    left:50%; top:50%;
+    width:0; height:0;
+    transform-origin: 0 0;
+    opacity:0;
+    transition: opacity .2s ease;
+    pointer-events:none;
+    will-change: transform, opacity;
+    backface-visibility:hidden;
+  }
+  .arrow::after{
+    content:"";
+    position:absolute;
+    width:26px; height:26px;
+    left:50%; top:-68px;
+    transform: translate(-50%,0) rotate(45deg);
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 6px 0 18px 0;
+    box-shadow: 0 0 12px rgba(124,247,255,.55);
+  }
+  .arrow.show{ opacity:1; }
+
+  /* 波纹：去掉 box-shadow 模糊 + 减少波纹数量到 1 条（eco 0 条） */
+  .ripple{
+    position:absolute; left:50%; top:50%;
+    width:60%; aspect-ratio:1/1;
+    transform: translate3d(-50%,-50%,0) scale(.6);
+    border-radius:50%;
+    border: 2px solid rgba(124,247,255,.7);
+    opacity:0;
+    pointer-events:none;
+    will-change: transform, opacity;
+    backface-visibility:hidden;
+  }
+  .ripple.show{ animation: ripple .9s ease-out 1; }
+  @keyframes ripple{
+    0%{ opacity:.8; transform: translate3d(-50%,-50%,0) scale(.45); }
+    100%{ opacity:0; transform: translate3d(-50%,-50%,0) scale(1.18); }
+  }
+  body.eco .ripple{ display:none; }
+
+  /* ===== 控制面板 ===== */
+  .row{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px;}
+  .btn{
+    appearance:none; border:1px solid var(--stroke);
+    background: rgba(255,255,255,.05);
+    color:var(--text);
+    padding:9px 14px; border-radius:12px;
+    font-size:13px; cursor:pointer;
+    transition:.2s ease;
+  }
+  .btn:hover{ background: rgba(124,247,255,.1); border-color: rgba(124,247,255,.35); }
+  .btn.primary{
+    background: linear-gradient(135deg, rgba(124,247,255,.2), rgba(255,139,210,.2));
+    border-color: rgba(124,247,255,.4);
+  }
+  .btn.on{
+    background: linear-gradient(135deg, rgba(110,245,160,.2), rgba(124,247,255,.2));
+    border-color: rgba(110,245,160,.5);
+    color: #e7fff2;
+  }
+
+  .emotions{
+    display:grid;
+    grid-template-columns: repeat(auto-fill, minmax(86px, 1fr));
+    gap:6px;
+    margin-bottom:14px;
+    max-height: 360px;
+    overflow: auto;
+    padding: 6px 4px;
+    /* 让滚动时不重绘整张卡片 */
+    -webkit-overflow-scrolling: touch;
+    transform: translateZ(0);
+    contain: content;
+  }
+  .emo{
+    display:flex; flex-direction:column; align-items:center; gap:4px;
+    padding:8px 4px; border-radius:10px;
+    background: rgba(255,255,255,.04);
+    border:1px solid var(--stroke);
+    cursor:pointer; user-select:none;
+    transition:.2s;
+    /* 缩略卡片独立合成层 — 悬停不牵动整张网格重排 */
+    transform: translateZ(0);
+    will-change: transform;
+    contain: layout paint style;
+  }
+  .emo:hover{ transform: translateY(-2px); background: rgba(255,255,255,.08); }
+  .emo.active{ border-color: var(--accent); background: rgba(124,247,255,.1); box-shadow: 0 0 0 1px rgba(124,247,255,.35) inset; }
+  .emo .thumb{
+    width:40px; height:40px;
+    display:grid; place-items:center;
+    /* 静态 SVG 背景图片（<img src="data:image/svg+xml"），没有 rAF */
+  }
+  .emo .thumb img{ width:100%; height:100%; display:block; }
+  .emo .id{ font-size:10px; color:var(--accent); font-weight:700; letter-spacing:.5px; }
+  .emo .lb{ font-size:11px; color:#e2e7ff; white-space:nowrap; max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+  .emo .grp{
+    font-size:10px; color:var(--muted); padding:1px 6px; border-radius:999px;
+    background: rgba(255,255,255,.06); border:1px solid var(--stroke);
+  }
+  .emo .grp.life{ color:#ffe4a3; border-color: rgba(255,214,107,.35); background: rgba(255,214,107,.08); }
+  .emo .grp.emotion{ color:#ffc4d8; border-color: rgba(255,139,210,.35); background: rgba(255,139,210,.08); }
+  .emo .grp.agent{ color:#baf3ff; border-color: rgba(124,247,255,.35); background: rgba(124,247,255,.08); }
+  .emo .grp.custom{ color:#d2ffcb; border-color: rgba(110,245,160,.35); background: rgba(110,245,160,.08); }
+
+  .group-tabs{
+    display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px;
+  }
+  .group-tabs button{
+    font-size:12px; padding:5px 10px; border-radius:999px;
+    border:1px solid var(--stroke); background: rgba(255,255,255,.04); color:var(--muted); cursor:pointer;
+  }
+  .group-tabs button.on{ color:var(--text); background: rgba(124,247,255,.12); border-color: rgba(124,247,255,.4); }
+
+  .search-bar{
+    width:100%; padding:8px 12px;
+    border-radius:10px; border:1px solid var(--stroke);
+    background: rgba(255,255,255,.04); color: var(--text);
+    font-size:12px;
+  }
+  .search-bar::placeholder{ color: var(--muted); }
+
+  .dirPad{
+    position:relative;
+    width:100%;
+    aspect-ratio: 1 / 1;
+    max-width: 360px;
+    margin: 6px auto 0;
+    border-radius: 18px;
+    background:
+      radial-gradient(circle at 50% 50%, rgba(255,255,255,.05), transparent 60%),
+      rgba(0,0,0,.18);
+    border:1px dashed var(--stroke);
+  }
+  .dirPad button{
+    position:absolute; left:50%; top:50%;
+    width:58px; height:58px; margin-left:-29px; margin-top:-29px;
+    border-radius:50%;
+    border:1px solid var(--stroke);
+    background: rgba(255,255,255,.06);
+    color:var(--text);
+    cursor:pointer;
+    display:grid; place-items:center;
+    transition:.2s;
+  }
+  .dirPad button:hover{
+    background: linear-gradient(135deg, rgba(124,247,255,.25), rgba(255,139,210,.25));
+    transform: scale(1.06);
+  }
+  .dirPad .lbl{
+    position:absolute;
+    font-size:11px; color:var(--muted);
+    left:50%; transform:translateX(-50%);
+    width:120px; text-align:center;
+  }
+  /* 8方位：半径 45% */
+  .dirPad .d0 { transform: translate(0, -45%); }  /* 上 北 */
+  .dirPad .d45{ transform: translate(45%, -45%); } /* 东北 */
+  .dirPad .d90{ transform: translate(45%, 0); }   /* 东 */
+  .dirPad .d135{transform: translate(45%, 45%); } /* 东南 */
+  .dirPad .d180{transform: translate(0, 45%); }   /* 南 */
+  .dirPad .d225{transform: translate(-45%, 45%); }/* 西南 */
+  .dirPad .d270{transform: translate(-45%, 0); }  /* 西 */
+  .dirPad .d315{transform: translate(-45%, -45%);}/* 西北 */
+
+  .legend{
+    display:grid; grid-template-columns: repeat(2, 1fr); gap:10px;
+    margin-top:10px; font-size:12px; color:var(--muted);
+  }
+  .legend b{ color:var(--text); font-weight:600; }
+
+  /* 成本 & 方案表 */
+  table{
+    width:100%; border-collapse: collapse; font-size:13px;
+  }
+  th,td{
+    padding:10px 8px;
+    border-bottom:1px dashed rgba(255,255,255,.1);
+    text-align:left; vertical-align:top;
+  }
+  th{ color:#cbd5ff; background: rgba(255,255,255,.04); }
+  td.num{ white-space:nowrap; font-variant-numeric: tabular-nums; }
+  .pill{
+    display:inline-block; padding:2px 8px; border-radius:999px;
+    font-size:11px; margin-right:4px;
+    background:rgba(255,255,255,.08);
+    border:1px solid var(--stroke);
+  }
+  .ok  { color:var(--ok);  border-color: rgba(110,245,160,.3); background:rgba(110,245,160,.08); }
+  .warn{ color:var(--warn);border-color: rgba(255,214,107,.3); background:rgba(255,214,107,.08); }
+  .bad { color:var(--bad); border-color: rgba(255,122,154,.3); background:rgba(255,122,154,.08); }
+
+  details{ border:1px solid var(--stroke); border-radius:12px; padding:10px 12px; margin-top:8px; background: rgba(255,255,255,.03); }
+  summary{ cursor:pointer; font-weight:600; }
+  details[open] summary{ margin-bottom:6px; }
+  ul.k{ margin:6px 0 0 18px; padding:0; }
+  ul.k li{ margin:4px 0; color:#d7deff; }
+
+  .badge-row{ display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🤖 Emotion-Ball · 圆形屏语音方向表情</h1>
+    <p>小白落地预览：方向识别 → 圆球朝声源方向偏移 + 对应表情动画。点击页面里的按钮即可预览效果。</p>
+  </header>
+
+  <section class="grid">
+    <!-- 左：圆形屏 Emotion-Ball 预览 -->
+    <div class="card">
+      <h2>圆形屏预览 <span class="tag">Live Demo</span></h2>
+      <div class="stage">
+        <div class="device" title="圆形屏硬件">
+          <div class="screen" id="screen">
+            <div class="stars"></div>
+
+            <!-- 方向指示光环（SVG） -->
+            <div class="ring">
+              <svg viewBox="0 0 100 100" aria-hidden="true">
+                <defs>
+                  <radialGradient id="g1" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stop-color="#7cf7ff" stop-opacity=".5"/>
+                    <stop offset="100%" stop-color="#7cf7ff" stop-opacity="0"/>
+                  </radialGradient>
+                </defs>
+                <circle cx="50" cy="50" r="46" fill="none" stroke="rgba(255,255,255,.12)" stroke-width=".4"/>
+                <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255,255,255,.08)" stroke-width=".3" stroke-dasharray="1 2"/>
+                <circle id="beam" cx="50" cy="50" r="44"
+                  fill="none" stroke="#7cf7ff" stroke-width=".6"
+                  stroke-dasharray="0 999" stroke-linecap="round"
+                  style="filter: drop-shadow(0 0 2px #7cf7ff); transition: stroke-dasharray .35s ease;"/>
+              </svg>
+            </div>
+
+            <!-- 波纹 -->
+            <div class="ripple" id="ripple"></div>
+            <!-- 方向箭头 -->
+            <div class="arrow" id="arrow"></div>
+
+            <!-- Emotion Ball 本体（使用开源 EmotionBall.create 渲染） -->
+            <div class="ball-wrap">
+              <div class="ball-aura" id="ballAura" aria-hidden="true"></div>
+              <div class="ball-shift" id="ballShift" role="img" aria-label="Emotion Ball (OpenSource sam70361)">
+                <div id="eb-render"></div>
+              </div>
+              <!-- 摸头手掌：只在 #50 被摸头时显示，CSS 拍动动画 -->
+              <div class="pet-hand" id="petHand" aria-hidden="true">
+                <svg viewBox="0 0 120 100" xmlns="http://www.w3.org/2000/svg">
+                  <!-- 手掌主体：圆润的手掌 + 4 根手指 + 拇指，用渐变填充模拟立体感 -->
+                  <defs>
+                    <linearGradient id="petHandGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                      <stop offset="0%" stop-color="#FFD0B5"/>
+                      <stop offset="60%" stop-color="#F5B89A"/>
+                      <stop offset="100%" stop-color="#E8A080"/>
+                    </linearGradient>
+                    <linearGradient id="petHandShine" x1="0%" y1="0%" x2="0%" y2="100%">
+                      <stop offset="0%" stop-color="rgba(255,255,255,0.35)"/>
+                      <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
+                    </linearGradient>
+                  </defs>
+                  <!-- 手掌（椭圆 + 圆角矩形组合） -->
+                  <ellipse cx="60" cy="60" rx="36" ry="28" fill="url(#petHandGrad)" stroke="#D89870" stroke-width="1.5"/>
+                  <!-- 高光 -->
+                  <ellipse cx="52" cy="48" rx="14" ry="8" fill="url(#petHandShine)"/>
+                  <!-- 4 根手指：并拢的弧形手指 -->
+                  <path d="M 30 48 Q 28 28 36 26 Q 44 25 42 46 Z" fill="url(#petHandGrad)" stroke="#D89870" stroke-width="1.2"/>
+                  <path d="M 46 40 Q 44 18 54 16 Q 62 16 58 38 Z" fill="url(#petHandGrad)" stroke="#D89870" stroke-width="1.2"/>
+                  <path d="M 62 38 Q 60 16 70 16 Q 78 18 74 36 Z" fill="url(#petHandGrad)" stroke="#D89870" stroke-width="1.2"/>
+                  <path d="M 76 42 Q 76 22 86 24 Q 92 28 88 44 Z" fill="url(#petHandGrad)" stroke="#D89870" stroke-width="1.2"/>
+                  <!-- 拇指 -->
+                  <ellipse cx="26" cy="64" rx="8" ry="14" fill="url(#petHandGrad)" stroke="#D89870" stroke-width="1.2" transform="rotate(-25 26 64)"/>
+                  <!-- 指间阴影（增强立体感） -->
+                  <path d="M 42 26 Q 43 35 42 46" stroke="rgba(200,130,90,0.25)" stroke-width="1" fill="none"/>
+                  <path d="M 58 16 Q 59 28 58 38" stroke="rgba(200,130,90,0.25)" stroke-width="1" fill="none"/>
+                  <path d="M 72 16 Q 73 28 74 36" stroke="rgba(200,130,90,0.25)" stroke-width="1" fill="none"/>
+                </svg>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:14px;">
+        <button class="btn primary" id="btnMic">🎤 模拟语音触发一次</button>
+        <button class="btn" id="btnAuto">🔁 自动演示</button>
+        <button class="btn" id="btnReset">⟳ 重置</button>
+      </div>
+      <h2 style="margin-top:4px;">🎛️ 流畅度档位 <span class="tag" title="掉帧就切 省电 / 平衡">FPS Tuning</span></h2>
+      <div class="row" id="perfBar" style="margin-bottom:4px;"></div>
+      <details>
+        <summary>为什么会掉帧？怎么选？（推荐直接点 ⚖️ 平衡）</summary>
+        <ul class="k">
+          <li>🔋 <b>省电</b>：缩略图静态图 + 背景/波纹/柔光全关 — 适合插在 Raspberry Pi/Orange Pi 这种低性能板子上，稳定 60fps。</li>
+          <li>⚖️ <b>平衡（默认）</b>：缩略图静态图 + 背景静止 + inset 柔光 — 特效不抢 SDK 的弹簧帧，主流笔记本/手机稳定丝滑。</li>
+          <li>✨ <b>丝滑</b>：开启星河双层漂移 + 径向混叠柔光，特效拉满 — 适合独显/高性能 PC，拍视频/演示用。</li>
+          <li>💡 小提示：<code>filter: drop-shadow</code> 和 <code>backdrop-filter: blur</code> 是掉帧两大元凶，<b>本页默认都关掉了</b>。</li>
+        </ul>
+      </details>
+    </div>
+
+    <!-- 右：交互 + 方案 -->
+    <div class="card">
+      <h2>表情选择（全部 33 种 · 32 原版 + 1 自定义） <span class="tag">OpenSource</span></h2>
+      <div style="color:var(--muted); font-size:12px; margin-bottom:8px;" id="thumbStatus">📦 缩略图离线快照生成中…首次会用 33 帧做静态缓存（以后就 0 rAF 了）</div>
+      <div class="group-tabs" id="groupTabs"></div>
+      <input id="emoSearch" class="search-bar" placeholder="搜索 33 种表情（ID / 中文名 / 英文 / 描述关键词，如 happy、被摸头、思考、sleep）"/>
+      <div class="emotions" id="emotions"></div>
+
+      <h2 style="margin-top:18px;">8 方向触发 <span class="tag">DoA 声源方向</span></h2>
+      <div class="dirPad" id="dirPad" aria-label="8方向触发板">
+        <button class="d0"   data-deg="0"   title="正前方 / 北 (0°)">↑</button>
+        <button class="d45"  data-deg="45"  title="东北 (45°)">↗</button>
+        <button class="d90"  data-deg="90"  title="右侧 / 东 (90°)">→</button>
+        <button class="d135" data-deg="135" title="东南 (135°)">↘</button>
+        <button class="d180" data-deg="180" title="正后方 / 南 (180°)">↓</button>
+        <button class="d225" data-deg="225" title="西南 (225°)">↙</button>
+        <button class="d270" data-deg="270" title="左侧 / 西 (270°)">←</button>
+        <button class="d315" data-deg="315" title="西北 (315°)">↖</button>
+        <span class="lbl" style="top:6px;">前 0°</span>
+        <span class="lbl" style="bottom:6px;">后 180°</span>
+      </div>
+
+      <h2 style="margin-top:18px;">当前状态 <span class="tag">Status</span></h2>
+      <div class="legend">
+        <div><b>方向：</b><span id="sDeg">—</span></div>
+        <div><b>表情：</b><span id="sEmo">happy 😊</span></div>
+        <div><b>偏移：</b><span id="sMove">0, 0</span></div>
+        <div><b>语音识别：</b><span id="sASR">未调用（Demo）</span></div>
+      </div>
+    </div>
+
+    <!-- 下：落地方案 + 成本 -->
+    <div class="card" style="grid-column: 1 / -1;">
+      <h2>💡 先答你最关心的：为什么量产版"几百块"，我写的散件版是 ¥1,305？</h2>
+      <p style="color:var(--muted); margin:0 0 10px;">
+        车载"仿 Nomi / 米德宝"这种圆形小人脸，量产 <b>10 万台以上 BOM 成本确实在 ¥150 ~ 350/台</b>。<b>零售散件 1 台 ≠ 量产 10 万台</b>。下面 5 条是差价的核心来源：
+      </p>
+      <table>
+        <thead>
+          <tr><th>#</th><th>项目</th><th>量产 10w 台（车载 Nomi 类）</th><th>我写的"手搓 1 台"</th><th>造成差价</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>主控</td><td>全志 V853 / RK3308 / RV1106 专用芯片，批量 ¥30~50</td><td>树莓派 5 4GB（零售通用板），¥520；品牌溢价 + 板子/USB/网口一大堆你用不到</td><td class="num"><b>-¥470</b></td></tr>
+          <tr><td>2</td><td>圆形屏</td><td>2.1~2.8 寸 MIPI 圆屏，FOG 裸屏直接贴 PCBA，批量 ¥30~80（2.1 寸 480×480 才 ¥30 多）</td><td>5 寸 1080×1080 HDMI 圆屏，单独驱动板 + 零售，¥380~650；你花了大钱买"大尺寸+HDMI 驱动板"，车载根本不用这么大</td><td class="num"><b>-¥320</b></td></tr>
+          <tr><td>3</td><td>麦克风阵列</td><td>2~4 颗模拟 MEMS 麦 + 1 颗自有 DSP，批量 ¥5~15；DoA/KWS 算法在自有芯片里硬解</td><td>ReSpeaker 整板（含 DSP、Codec、HAT 物理接口），零售 ¥180~220</td><td class="num"><b>-¥170</b></td></tr>
+          <tr><td>4</td><td>结构/外壳/人工</td><td>注塑开模 10w 台摊到每台 ¥3~5；产线贴装 SMT 人工费几乎 0</td><td>1 件 3D 打印光敏树脂 ¥80~150；你自己手焊，人工免费但贵在零买</td><td class="num"><b>-¥100</b></td></tr>
+          <tr><td>5</td><td>其他（电源/喇叭/线材/包装/税/物流）</td><td>每样几分几块钱，加起来 ¥15~30</td><td>散买：官方电源 ¥70、线材 ¥30、喇叭 ¥20… 一样一个贵很多</td><td class="num"><b>-¥80</b></td></tr>
+          <tr><td colspan="4" style="text-align:right;color:var(--muted);">手搓版 - 量产版 ≈</td><td class="num"><b style="color:var(--bad);">¥1,140 差价</b></td></tr>
+        </tbody>
+      </table>
+
+      <details open>
+        <summary>🎯 结论：你想要"几百块搞定实物"，完全可以 — 请直接看下面三档低预算方案（¥100/¥300/¥500）</summary>
+        <p style="margin:6px 0 0;">
+          核心技巧：<b>① 不要用树莓派；② 不要用 5 寸 HDMI 圆屏；③ 不要买 ReSpeaker 整板。</b>把这三项替换掉，立刻就能从 ¥1,305 压到 ¥300 左右。
+        </p>
+      </details>
+
+      <h2 style="margin-top:18px;">🧭 三档低预算落地方案（面向小白，都是"几百块"）<span class="tag">新增</span></h2>
+      <table>
+        <thead>
+          <tr>
+            <th>档位</th>
+            <th>实现方式</th>
+            <th>真·圆形屏</th>
+            <th>方向识别</th>
+            <th class="num">总预算 ¥</th>
+            <th class="num">开发耗时</th>
+            <th>缺点</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="pill ok">💰 ¥100 极限版</span></td>
+            <td>家里闲置旧 Android 手机（屏幕当圆屏用，外面套 3D 打印圆形遮罩 / 黑色贴纸挖洞）+ 任意耳机麦 + 手机浏览器或本地 WebView 打开本页面 HTML。</td>
+            <td>假·圆形屏（贴纸挖孔）；若旧手机是努比亚 Alpha / 小米环绕屏这类就变成真圆</td>
+            <td>双麦模拟 → 关键词「前面/后面/左边/右边」判定方向；或手机陀螺仪握持方向当朝向（手机哪边对着人，就算哪侧）</td>
+            <td class="num"><b>≈ ¥60 ~ 120</b>（旧手机 + ¥30 3D 打印圆面罩 + ¥20 双面胶/麦）</td>
+            <td class="num">半天</td>
+            <td>方向是"估"的，不是真 DoA；适合拍演示视频/交作业</td>
+          </tr>
+          <tr>
+            <td><span class="pill warn">💵 ¥300 主流版（🔥 小白首选）</span></td>
+            <td>
+              <b>主控：</b>香橙派 Zero3 1GB（¥130，全志 H618）<br/>
+              <b>真圆屏：</b>2.8 寸 SPI 圆屏（480×480，GC9A01，¥40，<b>淘宝搜「2.8寸圆形屏 SPI GC9A01」</b>）<br/>
+              <b>麦：</b>普通双 USB 麦（¥20，两个方向差 15cm 自己做个 2 麦小支架）<br/>
+              <b>其他：</b>TF 卡 ¥15、电源 ¥20、3D 外壳 ¥60
+            </td>
+            <td>✅ 真·2.8 寸圆形 SPI 屏（最接近车载 Nomi 那种 2.x 寸小笑脸）</td>
+            <td>2 麦 TDOA 软件算角度（用 ODAS/Python 自己写，GitHub 现成脚本，±30° 8 方向够用）；嫌麻烦就 +¥60 换 ReSpeaker USB 4Mic Lite</td>
+            <td class="num"><b>≈ ¥285 ~ 365</b></td>
+            <td class="num">1~2 天</td>
+            <td>2 麦 DoA 精度一般（±30°）；驱动 SPI 屏需要 copy-paste 一次 fbtft 驱动</td>
+          </tr>
+          <tr>
+            <td><span class="pill bad">💴 ¥500 加强版</span></td>
+            <td>
+              上面 ¥300 版的升级：<br/>
+              把 SPI 圆屏升级为 <b>3.4 寸 800×800 MIPI 圆屏 + HDMI 驱动小板</b>（¥180，<b>搜「3.4寸圆形屏 HDMI」</b>）；<br/>
+              麦换成 <b>ReSpeaker USB 4Mic Lite</b>（¥120，真 DoA ±15°）。
+            </td>
+            <td>✅ 真·3.4 寸更大的圆屏，HDMI 免驱，插上就是"正圆桌面"，不用配 SPI 驱动</td>
+            <td>ReSpeaker 4Mic 真 DoA ±15°，8 方向稳定；自带 KWS。</td>
+            <td class="num"><b>≈ ¥490 ~ 560</b></td>
+            <td class="num">1~2 天</td>
+            <td>到这里已经非常接近车载 Nomi 的体验了，唯一贵的是圆屏驱动板零售价</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <details>
+        <summary>💰 详细成本拆解 — ¥100 极限版</summary>
+        <table>
+          <tbody>
+            <tr><td>旧 Android 手机（屏幕 ≥ 5.5 寸，电池能开机）</td><td class="num">¥0（家里找）</td><td>推荐根目录装一个 Fullscreen WebView App，进 kiosk 模式</td></tr>
+            <tr><td>3D 打印圆形面罩（外径 130mm，内径 115mm 挖孔，贴屏幕前面）</td><td class="num">¥30</td><td>没打印机上淘宝"3D 打印服务"发一个 STL（我可以帮你出 STL 文件）</td></tr>
+            <tr><td>双 USB 麦克风（随便两个廉价领夹麦）</td><td class="num">¥20</td><td>用"关键词方向 + 左右音量差"估 DoA，精度 ±45° 够用</td></tr>
+            <tr><td>Type-C 长线 + 双面胶</td><td class="num">¥10</td><td>把手机固定到面罩后面</td></tr>
+            <tr><td style="text-align:right;"><b>合计</b></td><td class="num"><b>≈ ¥60</b></td><td>买新一点的二手手机也就再 +¥60，总共 ≤¥120</td></tr>
+          </tbody>
+        </table>
+      </details>
+
+      <details open>
+        <summary>💰 详细成本拆解 — ¥300 主流版（🔥 推荐）</summary>
+        <table>
+          <thead>
+            <tr><th>项目</th><th>型号/搜索关键词</th><th class="num">¥</th><th>说明</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>主控</td><td>香橙派 Orange Pi Zero3 1GB（全志 H618）</td><td class="num">130</td><td>比树莓派便宜 4 倍，性能够跑 Chromium + WebSocket</td></tr>
+            <tr><td>真·圆形屏</td><td><b>「2.8寸 圆形屏 SPI GC9A01 480x480」</b></td><td class="num">40</td><td>这个就是量产 Nomi 同款规格级别的小屏！别再买 5 寸了</td></tr>
+            <tr><td>TF 卡</td><td>16GB U1</td><td class="num">15</td><td>装 Orange Pi OS（Debian）</td></tr>
+            <tr><td>电源</td><td>5V3A USB-C 杂牌正经货即可</td><td class="num">20</td><td>不是 Pi 5，不用买官方 ¥70 电源</td></tr>
+            <tr><td>麦克风</td><td>普通 USB 双头领夹麦 x2 （关键词：「双麦 USB 领夹」）</td><td class="num">20</td><td>摆两个麦间距 15cm 做 TDOA；嫌精度低再 +¥60 换 ReSpeaker Lite</td></tr>
+            <tr><td>圆形外壳</td><td>3D 打印光敏树脂 1 件（内径 75mm，刚好塞 2.8 寸圆屏）</td><td class="num">60</td><td>外壳 STL 我可以给你出，10 分钟就画完</td></tr>
+            <tr><td colspan="2" style="text-align:right;"><b>合计</b></td><td class="num"><b>≈ ¥285</b></td><td>+¥80 换 USB 版 ReSpeaker 真 DoA，总共也才 ¥365</td></tr>
+          </tbody>
+        </table>
+      </details>
+
+      <details>
+        <summary>🧭 小白方案选择速查表</summary>
+        <ul class="k">
+          <li>👉 <b>你就是想做出来拍个视频 / 交课程设计 / 看效果</b>→ 选 ¥100 极限版，下午就能出成品</li>
+          <li>👉 <b>你要"真圆屏 + 真能说话转方向 + 预算 ≤350"</b>→ 选 ¥300 主流版（2.8" GC9A01 + 双麦），精度 ±30° 够用</li>
+          <li>👉 <b>你要接近车载 Nomi 的体验（方向准、屏幕分辨率高）</b>→ 选 ¥500 加强版（3.4" HDMI 圆屏 + ReSpeaker Lite DoA），¥560 封顶</li>
+          <li>👉 <b>你后面想批量生产 1000 台以上</b>→ 直接上 RV1106 + 2.8 寸 MIPI 圆屏 + 4 颗 MEMS 麦，BOM 可到 ¥220 以内，但需要开模费 ¥3~8w 起步</li>
+        </ul>
+      </details>
+
+      <h2 style="margin-top:18px;">🧭 小白完整可行落地方案（全部 6 档对照）<span class="tag">6 个档位</span></h2>
+      <p style="color:var(--muted); margin:0 0 10px;">
+        核心链路：<b>麦克风阵列 → 方向(DoA) + 语音内容 → 前端/渲染层 → Emotion-Ball 按方向偏移并切换表情</b>。
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>档位</th>
+            <th>实现方式</th>
+            <th>是否可做圆形屏</th>
+            <th>方向识别精度</th>
+            <th>适合人群</th>
+            <th class="num">总预算（¥）</th>
+            <th class="num">开发耗时</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="pill ok">Demo 版</span></td>
+            <td>电脑/平板浏览器 + Web Speech API（或键盘/按钮模拟方向），页面就是一张圆形 UI，不需要硬件。</td>
+            <td>屏幕上画一个圆，非真·硬件圆形屏；外接圆形显示器可直接用。</td>
+            <td>依赖浏览器模拟或手动输入：0 / 45 / 90 / 135 / 180 / 225 / 270 / 315，共 8 档。</td>
+            <td>小白、做 PPT 演示、快速拍视频。</td>
+            <td class="num"><b>0 ~ 500</b><br/>(若买个圆形便携屏加 300~500)</td>
+            <td class="num">0.5 ~ 1 天</td>
+          </tr>
+          <tr>
+            <td><span class="pill warn">进阶版</span></td>
+            <td>树莓派 4B / 5 + 4/6 麦阵列（如 ReSpeaker 4-Mic）+ 5 寸 HDMI 圆形屏（LS055R1SX04 驱动板）+ Chromium 自启网页。</td>
+            <td>真·硬件圆形屏（5 寸 1080×1080 或 720×720）。</td>
+            <td>DoA 8 方位 ±15°；若上 KWS 唤醒词（如 "Hello Ball"），可做到只在唤醒后触发表情切换。</td>
+            <td>愿意焊 2~3 条线、会复制粘贴命令行的小白。</td>
+            <td class="num"><b>900 ~ 1,800</b></td>
+            <td class="num">2 ~ 5 天（含排错）</td>
+          </tr>
+          <tr>
+            <td><span class="pill bad">量产/专业版</span></td>
+            <td>嵌入式：ESP32-S3 / Rockchip RV1106 + 6~8 麦阵列（硬件 VAD + 原生 DoA 算法）+ 1.3~3.4 寸 SPI/MIPI 圆屏 + LVGL / Unity / 自研渲染。</td>
+            <td>真·硬件圆形屏，可选 1.28"/1.69"/2.1"/2.8"/3.4"/5" 多种。</td>
+            <td>360° 连续角度（±5° 内），支持噪声抑制 + 回声消除，远场 3~5 米可用。</td>
+            <td>团队/要做产品上市；个人成本偏高不推荐。</td>
+            <td class="num"><b>3,000 ~ 20,000+</b><br/>(开模另计 2~10 万)</td>
+            <td class="num">3 ~ 8 周</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <details open>
+        <summary>💰 详细成本拆解（进阶版 · 最推荐给小白做实物）</summary>
+        <table>
+          <thead>
+            <tr><th>项目</th><th>型号/规格（示例）</th><th class="num">单价 ¥</th><th class="num">数量</th><th class="num">小计 ¥</th><th>说明</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>主控</td><td>树莓派 5 4GB</td><td class="num">520</td><td class="num">1</td><td class="num">520</td><td>嫌贵换 Pi 4B 2GB（约 320）</td></tr>
+            <tr><td>TF 卡</td><td>32GB U3</td><td class="num">25</td><td class="num">1</td><td class="num">25</td><td>装 Raspberry Pi OS</td></tr>
+            <tr><td>电源</td><td>Pi 5 官方 27W USB-C</td><td class="num">70</td><td class="num">1</td><td class="num">70</td><td>别用杂牌，容易不稳定</td></tr>
+            <tr><td>圆形屏（重点）</td><td>5 寸 1080×1080 HDMI 圆屏 + 驱动板</td><td class="num">380 ~ 650</td><td class="num">1</td><td class="num">380</td><td>搜关键词：<b>5寸圆形屏 HDMI</b>；小一点可选 3.4" 800×800（约 180）</td></tr>
+            <tr><td>麦克风阵列</td><td>Seeed ReSpeaker 4-Mic Array for Pi</td><td class="num">180 ~ 220</td><td class="num">1</td><td class="num">180</td><td>直接给 DoA 角度输出；省掉自己算算法</td></tr>
+            <tr><td>喇叭（可选）</td><td>4Ω 3W 小喇叭 + 功放板</td><td class="num">12 + 8</td><td class="num">1</td><td class="num">20</td><td>要播 TTS 才需要</td></tr>
+            <tr><td>外壳</td><td>3D 打印（光敏树脂）1 件</td><td class="num">80 ~ 150</td><td class="num">1</td><td class="num">80</td><td>把圆屏和 Pi 塞进去</td></tr>
+            <tr><td>线材</td><td>HDMI FPC / 杜邦线 / 铜柱</td><td class="num">30</td><td class="num">1 套</td><td class="num">30</td><td></td></tr>
+            <tr><td>云服务（可选）</td><td>讯飞/阿里/百度 语音识别 + 情感识别（按调用量）</td><td class="num">0 ~ 50/月</td><td class="num">月</td><td class="num">0</td><td>本地离线：Vosk 中文 0 成本，效果略差</td></tr>
+            <tr><td colspan="4" style="text-align:right;"><b>合计（不含云服务）</b></td><td class="num"><b>≈ 1,305</b></td><td>可压缩到 ≈ 900（Pi 4B + 3.4 圆屏）</td></tr>
+          </tbody>
+        </table>
+      </details>
+
+      <details>
+        <summary>🧠 软件系统架构（小白照抄即可）</summary>
+        <ul class="k">
+          <li><b>1. 方向识别层（DoA）：</b>ReSpeaker 自带 ODAS / VAD + GCC-PHAT，直接输出 0~360° 角度；Pi 端一个 Python 脚本订阅角度，角度变化超过 20° 且能量超过阈值就推送一次事件。</li>
+          <li><b>2. 语音理解层（ASR + Emotion）：</b>
+            <div class="badge-row" style="margin-top:6px;">
+              <span class="pill ok">本地零成本</span> Vosk 中文小模型 + 关键词匹配（"你好"/"谢谢"/"讨厌" → 映射 happy/love/angry）
+              <span class="pill warn">云端省心</span> 讯飞语音听写（免费额度够家用）+ 简单情感分类
+            </div>
+          </li>
+          <li><b>3. 显示渲染层（就是你看到的这张 HTML）：</b>
+            <ul class="k">
+              <li>Pi 上 Chromium 以 <code>--kiosk --start-fullscreen</code> 自启动打开本地 <code>emotion-ball-preview.html</code>。</li>
+              <li>Python 后端通过 WebSocket 把 <code>{deg, emotion}</code> 推给网页，网页更新 <code>--tx/--ty</code> 让球偏移、切换表情类名。</li>
+              <li>屏幕分辨率设置为圆形屏原生分辨率（例如 1080×1080），body 用 <code>width:100vw;height:100vh</code> 刚好铺满。</li>
+            </ul>
+          </li>
+          <li><b>4. 方向→偏移换算：</b>屏幕半径 R = 屏幕短边的 <b>22%</b>；偏移量 = <code>(R·sin(θ), -R·cos(θ))</code>，其中 θ 为 0° 指向"正前方/屏幕上方"。Demo 里按此实现，可直接复用。</li>
+        </ul>
+      </details>
+
+      <details>
+        <summary>🪜 小白 5 步落地清单（进阶版）</summary>
+        <ul class="k">
+          <li>① 采购（1~2 天）：树莓派 5 + 5 寸圆形 HDMI 屏 + ReSpeaker 4-Mic。</li>
+          <li>② 装机（2 小时）：插屏幕 HDMI / 接 ReSpeaker 的 Pi HAT 帽子 / 3D 打印外壳把东西塞进去。</li>
+          <li>③ 烧系统 & 装驱动（半天）：Raspberry Pi Imager 烧录系统；ReSpeaker 一键安装脚本（见官方 Wiki，复制粘贴即可）；验证 <code>arecord -L</code> 能看到 4 个通道。</li>
+          <li>④ 跑 Demo 方向（半天）：跑 ODAS 的 <code>odaslive</code> 或 Seeed 官方的 <code>doa_demo.py</code>，对着 8 个方向说话，看终端里角度是不是跟着变。</li>
+          <li>⑤ 接本页面（2~4 小时）：写 50 行 Python WebSocket → 收到角度 & 情感后，浏览器里的 Emotion-Ball 自动朝那个方向摆脸。完成 ✅</li>
+        </ul>
+      </details>
+
+      <details>
+        <summary>🎛️ 纯 Demo 版（零硬件）— 10 分钟搞定</summary>
+        <ul class="k">
+          <li>打开本页 HTML：右边的「8 方向触发板」就是你硬件方向的替身，点方向键 → Emotion-Ball 立刻朝那个方向看。</li>
+          <li>点 <b>🎤 模拟语音触发一次</b> → 随机一个方向 + 随机情感，给老板/朋友演示效果。</li>
+          <li>浏览器原生语音识别：点 <b>🎙 试试浏览器 Web Speech</b>（需 Chrome/Edge，且允许麦克风）。说「你好，真棒」→ 大概率识别成 happy；说「讨厌」→ angry；说「谢谢 / 喜欢」→ love。（注：如果系统/浏览器不支持，会降级为模拟。）</li>
+        </ul>
+      </details>
+
+      <div class="row" style="margin-top:16px;">
+        <button class="btn primary" id="btnSpeech">🎙 试试浏览器 Web Speech（在线 ASR）</button>
+        <button class="btn" id="btnStop">⏹ 停止监听</button>
+      </div>
+      <div style="color:var(--muted); font-size:12px; margin-top:6px;">
+        提示：Web Speech API 仅在 Chrome / Edge 可用，且推荐通过 <code>http(s)://localhost</code> 或 HTTPS 打开。否则会走"模拟模式"，你依然能看到方向与表情联动。
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+  /* ============================================================
+   * Emotion-Ball 逻辑（基于 sam70361/emotion-ball 开源 SDK）
+   *   渲染：EmotionBall.create(el, { emotion:'02', shape:'blob', idle:false })
+   *   切表情：ball.setEmotion(id) 或 ball.handleAIMessage({ emotionId, tips })
+   *   方向：外层 ball-shift 容器做 --tx/--ty 平移（保留开源库的视线跟随/动画）
+   * ============================================================ */
+  const arrow   = document.getElementById('arrow');
+  const ripple  = document.getElementById('ripple');
+  const beam    = document.getElementById('beam');
+  const sDeg    = document.getElementById('sDeg');
+  const sEmo    = document.getElementById('sEmo');
+  const sMove   = document.getElementById('sMove');
+  const sASR    = document.getElementById('sASR');
+  const screen  = document.getElementById('screen');
+  const shift   = document.getElementById('ballShift');
+  const aura    = document.getElementById('ballAura');
+  const emoList = document.getElementById('emotions');
+  const tabs    = document.getElementById('groupTabs');
+  const search  = document.getElementById('emoSearch');
+
+  // ——— 1. 初始化开源 SDK ———
+  const ballShiftEl = document.getElementById('eb-render');
+  const ball = (window.EmotionBall && EmotionBall.create)
+    ? EmotionBall.create(ballShiftEl, { emotion:'10', shape:'blob', idle:false })
+    : null;
+  if(!ball){
+    sEmo.textContent = '⚠ EmotionBall SDK 加载失败，检查 emotion-ball/js/*.js 是否存在';
+  }
+
+  // ——— 2. 从开源库读取全部 32 种表情（EMOTION_SEED + EMOTION_GROUPS） ———
+  const EMOTIONS = (window.EMOTION_SEED || []).slice();
+  const GROUPS = (window.EMOTION_GROUPS || []);
+  const groupMap = Object.fromEntries(GROUPS.map(g => [g.key, g]));
+
+  let currentEmoId = (EMOTIONS[0] && EMOTIONS[0].id) || '10';
+  let filterGroup = 'all';
+  let filterText = '';
+
+  /* ============================================================
+   * 流畅度档位（核心优化开关）
+   *   eco    : 省电 — 去掉背景/柔光/波纹，缩略图只做静态块
+   *   balance: 平衡（默认）— 静止背景 + inset 柔光，主球保持原生弹簧
+   *   silky  : 丝滑 — 全部特效开启，星河双图层、柔光径向渐变混叠
+   * ============================================================ */
+  const PERF_MODES = [
+    { key:'eco',     name:'🔋 省电' },
+    { key:'balance', name:'⚖️ 平衡（推荐）' },
+    { key:'silky',   name:'✨ 丝滑' }
+  ];
+  let perfMode = localStorage.getItem('eb.perf') || 'balance';
+  function applyPerfMode(mode){
+    perfMode = PERF_MODES.find(x=>x.key===mode) ? mode : 'balance';
+    document.body.classList.remove('eco','balance','silky');
+    document.body.classList.add(perfMode);
+    localStorage.setItem('eb.perf', perfMode);
+    const bar = document.getElementById('perfBar');
+    if(bar) bar.querySelectorAll('button').forEach(b=>{
+      b.classList.toggle('on', b.dataset.k === perfMode);
+    });
+  }
+
+  // ——— 3. 渲染流畅度档位按钮 ———
+  function renderPerfBar(){
+    const wrap = document.getElementById('perfBar');
+    if(!wrap) return;
+    wrap.innerHTML = PERF_MODES.map(m=>{
+      return `<button class="btn" data-k="${m.key}" ${m.key===perfMode?'class="btn on"':'style="margin:0;"'} title="流畅度预设：${m.name}">${m.name}</button>`;
+    }).join('');
+    wrap.querySelectorAll('button').forEach(b=>{
+      b.addEventListener('click', ()=> applyPerfMode(b.dataset.k));
+    });
+    // 修正 class 重复：先清再重新挂
+    wrap.querySelectorAll('button').forEach(b=>{
+      b.className = 'btn' + (b.dataset.k===perfMode ? ' on' : '');
+    });
+    applyPerfMode(perfMode);
+  }
+
+  // ——— 4. 缩略图离线快照（关键优化：把 32 个 rAF 压成 0 个）
+  //     做法：用一个离屏容器，逐个 setEmotion → 取 SVG innerHTML → 编码成 data:image/svg+xml 缓存 → 销毁离屏实例
+  const thumbCache = new Map();   // id -> data URL
+  let thumbTask = null;           // 避免重复生成
+  function buildThumbCache(progressCb, doneCb){
+    if(thumbTask){ thumbTask.then(doneCb); return; }
+    if(thumbCache.size === EMOTIONS.length){ if(doneCb) doneCb(); return; }
+    if(!ball || !EmotionBall.create){
+      // SDK 没加载 → 用 CSS 色球兜底
+      EMOTIONS.forEach((e,i)=> thumbCache.set(e.id, fallbackThumbSVG(e.id)));
+      if(doneCb) doneCb();
+      return;
+    }
+    thumbTask = (async function(){
+      const root = document.createElement('div');
+      root.style.cssText = 'position:fixed;left:-9999px;top:0;width:64px;height:64px;';
+      document.body.appendChild(root);
+      let tiny = null;
+      try{
+        tiny = EmotionBall.create(root, { emotion:'02', shape:'blob', idle:false, gaze:false });
+      }catch(_){ tiny = null; }
+      // 等 SDK 的第一帧有机会写入 SVG
+      await new Promise(r => requestAnimationFrame(()=> requestAnimationFrame(r)));
+      for(let i=0;i<EMOTIONS.length;i++){
+        const e = EMOTIONS[i];
+        try{ if(tiny) tiny.setEmotion(e.id); }catch(_){}
+        // 至少等一帧，让 setEmotion 的弹簧/插值把 SVG 形状写进去
+        await new Promise(r => requestAnimationFrame(r));
+        const svg = root.querySelector('svg');
+        let url = null;
+        if(svg){
+          url = svgToDataURL(svg);
+        }else{
+          url = fallbackThumbSVG(e.id);
+        }
+        thumbCache.set(e.id, url);
+        if(progressCb) try{ progressCb(i+1, EMOTIONS.length); }catch(_){}
+      }
+      try{ if(tiny && tiny.destroy) tiny.destroy(); }catch(_){}
+      root.remove();
+      if(doneCb) doneCb();
+    })();
+  }
+  function svgToDataURL(svg){
+    try{
+      // 深拷贝一份，把尺寸固定成 viewBox，否则浏览器无法按 data URL 渲染
+      const clone = svg.cloneNode(true);
+      if(!clone.getAttribute('xmlns')) clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+      if(!clone.getAttribute('viewBox')){
+        const w = parseFloat(svg.getAttribute('width')) || parseFloat(svg.clientWidth) || 100;
+        const h = parseFloat(svg.getAttribute('height')) || parseFloat(svg.clientHeight) || 100;
+        clone.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      }
+      const html = new XMLSerializer().serializeToString(clone);
+      // 不需要 UTF-8 escape，用 encodeURIComponent 足够
+      return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(html);
+    }catch(_){
+      return null;
+    }
+  }
+  function fallbackThumbSVG(id){
+    // 兜底：按 id 生成一个渐变色球 + id 文字的 SVG
+    const palette = [
+      '#7cf7ff','#6ef5a0','#ff8bd2','#ffd66b','#a089ff','#ff9d6c',
+      '#79e3ff','#ffc4d8','#b4ffdd','#fff0a3'
+    ];
+    const h = (parseInt(id, 10) * 37) % palette.length;
+    const c1 = palette[h], c2 = palette[(h+3) % palette.length];
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
+      <defs><radialGradient id="g" cx="35%" cy="30%" r="75%">
+        <stop offset="0%" stop-color="${c1}"/><stop offset="100%" stop-color="${c2}"/>
+      </radialGradient></defs>
+      <circle cx="20" cy="20" r="16" fill="url(#g)" opacity=".9"/>
+      <circle cx="20" cy="20" r="16" fill="none" stroke="rgba(255,255,255,.5)" stroke-width="1"/>
+      <text x="20" y="24" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#0b0f32" font-weight="700">${id}</text>
+    </svg>`;
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  }
+
+  // ——— 5. 渲染分组 Tab ———
+  function renderTabs(){
+    const items = [{key:'all', name:'全部', en:'All', count: EMOTIONS.length}].concat(
+      GROUPS.map(g => ({ key:g.key, name:g.name, en:g.en, count: EMOTIONS.filter(e=>e.group===g.key).length }))
+    );
+    tabs.innerHTML = items.map(it => `
+      <button data-g="${it.key}" class="${it.key===filterGroup?'on':''}">
+        ${it.name} <span style="opacity:.6;">(${it.count})</span>
+      </button>`).join('');
+    tabs.querySelectorAll('button').forEach(b=>{
+      b.addEventListener('click', ()=>{
+        filterGroup = b.dataset.g;
+        renderTabs();
+        renderList();
+      });
+    });
+  }
+
+  // ——— 6. 渲染 32 表情网格（⚠️ 不再创建 32 个 EmotionBall 实例！只写静态 <img src=data URL>）
+  function renderList(){
+    const kw = filterText.trim().toLowerCase();
+    const rows = EMOTIONS.filter(e => {
+      if(filterGroup !== 'all' && e.group !== filterGroup) return false;
+      if(!kw) return true;
+      const hay = [e.id, e.name, e.group, (e.en&&e.en.name||''), e.desc, (e.en&&e.en.desc||'')]
+                    .join(' ').toLowerCase();
+      return hay.includes(kw);
+    });
+    emoList.innerHTML = rows.map(e => {
+      const g = groupMap[e.group];
+      const gName = g ? g.name : e.group;
+      const enName = (e.en && e.en.name) ? `<span style="color:var(--muted);font-size:10px;margin-left:4px;">${e.en.name}</span>` : '';
+      const src = thumbCache.get(e.id) || 'about:blank';
+      const alt = `${e.id} ${e.name} · ${(e.en&&e.en.name)||''}`;
+      return `
+        <div class="emo ${e.id===currentEmoId?'active':''}" data-id="${e.id}" title="${e.id} ${e.name} · ${e.desc.replace(/"/g,'&quot;')}">
+          <div class="thumb" data-thumb="${e.id}">
+            <img alt="${alt}" decoding="async" loading="lazy" src="${src}" />
+          </div>
+          <span class="id">#${e.id}</span>
+          <span class="lb">${e.name}${enName}</span>
+          <span class="grp ${e.group}">${gName}</span>
+        </div>
+      `;
+    }).join('');
+    // 点击切
+    emoList.querySelectorAll('.emo').forEach(n=>{
+      n.addEventListener('click', ()=> setEmotionById(n.dataset.id, true));
+    });
+  }
+
+  // ——— 7. 切表情主函数（统一走 SDK） ———
+  function setEmotionById(id, fromUI){
+    if(!ball) return;
+    const def = EMOTIONS.find(x => x.id === id);
+    const useId = def ? id : '02';   // 02 = 待机放空（SDK 推荐兜底）
+    currentEmoId = useId;
+    // SDK 切换（对外推荐 handleAIMessage，这样也会联动 tips；这里我们直接 setEmotion 更快）
+    try{ ball.setEmotion(useId); }catch(_){}
+    const d = EMOTIONS.find(x=>x.id===useId) || {};
+    const en = (d.en && d.en.name) ? ` · ${d.en.name}` : '';
+    sEmo.textContent = `#${useId} ${d.name||''}${en}`;
+    // 高亮（不写全量 innerHTML，避免滚动跳动）
+    emoList.querySelectorAll('.emo').forEach(n=>{
+      n.classList.toggle('active', n.dataset.id === useId);
+    });
+    // 摸头手掌：仅 #50 被摸头时显示，其余表情隐藏
+    const petHand = document.getElementById('petHand');
+    if(petHand){
+      petHand.classList.toggle('show', useId === '50');
+    }
+    if(fromUI !== 'silent') flashRipple();
+  }
+
+  // ——— 8. 方向（声源方向 → Emotion‑Ball 朝这个方向看过去） ———
+  // 节流：短时间内重复角度推送不重算，减少 transition 重启动造成的抖动
+  let _lastDirT = 0;
+  function setDirection(deg){
+    deg = ((deg % 360) + 360) % 360;
+    const now = performance.now();
+    if(now - _lastDirT < 80 && deg === parseInt((sDeg.textContent||'0°'),10)) return;
+    _lastDirT = now;
+    // 约定：0° = 屏幕正上方 = 正前方
+    // 最大偏移 = 屏幕短边 * 18%（考虑小球本身尺寸较大，不跑出圆屏）
+    const rect = screen.getBoundingClientRect();
+    const R = Math.min(rect.width, rect.height) * 0.18;
+    const rad = deg * Math.PI / 180;
+    const tx =  R * Math.sin(rad);
+    const ty = -R * Math.cos(rad);
+    // 直接用 transform translate3d 写，不要走 CSS 变量的多步解析（多一次变量求值就多一次抖动）
+    shift.style.transform = `translate3d(${tx.toFixed(1)}px, ${ty.toFixed(1)}px, 0)`;
+    aura.style.transform  = `translate3d(calc(-50% + ${tx.toFixed(1)}px), calc(-50% + ${ty.toFixed(1)}px), 0)`;
+    sDeg.textContent = deg + '°';
+    sMove.textContent = `${tx.toFixed(0)}, ${ty.toFixed(0)}`;
+
+    // 方向箭头 + 光束弧（合成层动画）
+    arrow.style.transform = `rotate(${deg}deg)`;
+    arrow.classList.add('show');
+    clearTimeout(arrow._t);
+    arrow._t = setTimeout(()=>arrow.classList.remove('show'), 900);
+
+    const arcLen = 70;
+    const circumference = 2 * Math.PI * 44;
+    const degFrac = deg / 360;
+    const offset0 = (degFrac * circumference - arcLen/2 + circumference*10) % circumference;
+    beam.setAttribute('stroke-dasharray', `${arcLen} ${circumference - arcLen}`);
+    const topOffset = circumference * 0.25;
+    beam.setAttribute('stroke-dashoffset', (topOffset - offset0).toFixed(2));
+  }
+
+  // 波纹 —— 节流：160ms 内只触发一次，避免 setEmotion + trigger 连环调用时并发多圈
+  let _rippleT = 0;
+  function flashRipple(){
+    if(perfMode === 'eco') return;
+    const now = performance.now();
+    if(now - _rippleT < 160) return;
+    _rippleT = now;
+    ripple.classList.remove('show');
+    // 用 reflow 触发器替换 void offsetWidth，可读性更好
+    void ripple.getBoundingClientRect();
+    ripple.classList.add('show');
+  }
+
+  // ——— 9. UI 绑定 ———
+  search.addEventListener('input', ()=>{ filterText = search.value; renderList(); });
+
+  document.getElementById('dirPad').addEventListener('click', (e)=>{
+    const b = e.target.closest('button[data-deg]');
+    if(!b) return;
+    triggerByDeg(Number(b.dataset.deg));
+  });
+
+  function triggerByDeg(deg, emoId){
+    setDirection(deg);
+    if(emoId) setEmotionById(emoId);
+    flashRipple();
+  }
+
+  document.getElementById('btnReset').addEventListener('click', ()=>{
+    shift.style.transform = 'translate3d(0px, 0px, 0)';
+    aura.style.transform  = 'translate3d(-50%, -50%, 0)';
+    sDeg.textContent = '—';
+    sMove.textContent = '0, 0';
+    arrow.classList.remove('show');
+    beam.setAttribute('stroke-dasharray', '0 999');
+    stopAuto();
+  });
+
+  document.getElementById('btnMic').addEventListener('click', ()=>{
+    const dirs = [0,45,90,135,180,225,270,315];
+    const ids = EMOTIONS.map(e=>e.id);
+    const deg = dirs[Math.floor(Math.random()*dirs.length)];
+    const id  = ids[Math.floor(Math.random()*ids.length)];
+    triggerByDeg(deg, id);
+  });
+
+  /* ===== 自动演示（遍历 32 表情 × 8 方向） ===== */
+  let autoTimer = null;
+  const btnAuto = document.getElementById('btnAuto');
+  btnAuto.addEventListener('click', ()=>{
+    if(autoTimer){ stopAuto(); return; }
+    const dirs = [0,45,90,135,180,225,270,315];
+    const ids  = EMOTIONS.map(e=>e.id);
+    let i = 0;
+    btnAuto.classList.add('on');
+    autoTimer = setInterval(()=>{
+      const deg = dirs[i % dirs.length];
+      const id  = ids[i % ids.length];
+      // 让当前选中的缩略图保持可见
+      const node = emoList.querySelector(`.emo[data-id="${id}"]`);
+      if(node) node.scrollIntoView({ block:'nearest', behavior:'smooth' });
+      triggerByDeg(deg, id);
+      i++;
+    }, 1600);
+  });
+  function stopAuto(){
+    if(autoTimer){ clearInterval(autoTimer); autoTimer = null; }
+    btnAuto.classList.remove('on');
+  }
+
+  /* ===== 语音关键词 → 开源 32 种 emotionId 的精细映射 =====
+     覆盖全部 32 种，尽量贴近原项目 emotionId 语义。
+     同时支持 handleAIMessage({ emotionId, tips }) 的官方对接模式。 */
+  const AI_KEYWORD_MAP = [
+    /* —— 生命周期 00~07 —— */
+    { id:'00', re:/(睡觉|睡了|睡眠|困死|下班|晚安|停止|待机啦)/ },
+    { id:'01', re:/(起床|早|醒醒|起来了|早安)/ },
+    { id:'02', re:/(放空|没事|随便|看看|待命)/ },
+    { id:'03', re:/(好奇|这是啥|这是什么|想知道|研究|看看)/ },
+    { id:'04', re:/(发呆|走神|溜号|想事情|出神)/ },
+    { id:'05', re:/(加载|初始化|启动|开机|载入|正在加载)/ },
+    { id:'06', re:/(休眠|屏保|歇着|待命 睡眠)/ },
+    { id:'07', re:/(抖动|抖醒|震动|摇醒|闹铃|闹钟)/ },
+    /* —— 情绪反应 10~21 —— */
+    { id:'10', re:/(开心|高兴|哈哈|快乐|棒|赞|太好了|好耶|耶|好的|谢谢)/ },
+    { id:'11', re:/(疑惑|奇怪|纳闷|不对吧|这不对|是吗|真的假的)/ },
+    { id:'12', re:/(失落|失望|沮丧|凉凉|没了|难过一小下)/ },
+    { id:'13', re:/(惊讶|哇塞|我去|天啊|竟然|不会吧|什么)/ },
+    { id:'14', re:/(害羞|腼腆|不好意思|脸红|怪难为情)/ },
+    { id:'15', re:/(疲惫|累|累死|困|乏力|不想动)/ },
+    { id:'16', re:/(专注|仔细|认真|盯着|研究|看清楚)/ },
+    { id:'17', re:/(慌张|紧张|慌了|惊慌|完了|糟了|坏了)/ },
+    { id:'18', re:/(无奈|无语|服了|算了吧|翻白眼|哎|唉|随便吧)/ },
+    { id:'19', re:/(满意|可以|不错|认可|点头|挺好|非常好)/ },
+    { id:'20', re:/(困惑|迷糊|懵|不懂|不会|搞不懂|难住)/ },
+    { id:'21', re:/(生气|愤怒|气死|讨厌|滚|混蛋|可恶|闭嘴|烦人)/ },
+    /* —— 代理工作状态 30~41 —— */
+    { id:'30', re:/(思考|想想|思索|正在想|分析|琢磨)/ },
+    { id:'31', re:/(收到|好的|收到任务|明白|接收到|好的老板|了解|了解了)/ },
+    { id:'32', re:/(处理中|忙碌|正在处理|稍等|等一下|别急)/ },
+    { id:'33', re:/(完成|搞定|做好了|结束|成功|干完了)/ },
+    { id:'34', re:/(出错|错误|失败|报错|坏了|不行|异常|崩了|Error)/ },
+    { id:'35', re:/(等你|等我输入|你说|请说|在等|等待|听你说|请讲|请输入)/ },
+    { id:'36', re:/(联网|搜索|上网|查询|查一下|检索中|查找资料|百度|谷歌)/ },
+    { id:'37', re:/(回忆|复述|记得|想起|之前说过|回顾)/ },
+    { id:'38', re:/(拒绝|不行|不能|不可以|受限|违反|禁止|权限|抱歉我不能)/ },
+    { id:'39', re:/(输出|回复|回答|说一下|这是答案|结果如下|如下)/ },
+    { id:'40', re:/(检索|查资料|查找|搜索资料|找一下|查阅|RAG|知识库)/ },
+    { id:'41', re:/(停止|终止|结束|取消|别做了|停下|够了|STOP)/ },
+    /* —— 自定义 50+ —— */
+    { id:'50', re:/(摸头|摸摸|摸摸头|撸|撸一撸|摸一下头|pat|pet|摸摸脑袋|揉揉头|揉脑袋)/ }
+  ];
+  function textToEmotionId(text){
+    const t = text || '';
+    for(const r of AI_KEYWORD_MAP){ if(r.re.test(t)) return r.id; }
+    // 兜底：按正/负性估一下
+    const pos = (t.match(/(好|棒|赞|对|行|可以|喜欢|乐|美|爱|完成|成功|感谢)/g)||[]).length;
+    const neg = (t.match(/(坏|差|错|难|不|烦|气|累|困|失败|错误|崩)/g)||[]).length;
+    if(pos > neg) return '10';
+    if(neg > pos) return '21';
+    return '02'; // 兜底待机
+  }
+  // 对外对接官方 SDK：ball.handleAIMessage(JSON 或 对象)
+  function handleAIMessage(payload){
+    if(!ball) return null;
+    try{ ball.handleAIMessage(payload); }catch(_){}
+    const obj = typeof payload === 'string' ? JSON.parse(payload) : payload;
+    if(obj && obj.emotionId){
+      currentEmoId = obj.emotionId;
+      const d = EMOTIONS.find(x=>x.id===obj.emotionId);
+      sEmo.textContent = `#${obj.emotionId} ${d?d.name:''}` + ((d&&d.en&&d.en.name)?` · ${d.en.name}`:'');
+      emoList.querySelectorAll('.emo').forEach(n=> n.classList.toggle('active', n.dataset.id===obj.emotionId));
+      return obj.emotionId;
+    }
+    return null;
+  }
+
+  /* ===== Web Speech（Chrome/Edge），支持语音中的方向关键词 ===== */
+  let recog = null;
+  document.getElementById('btnSpeech').addEventListener('click', ()=>{
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if(!SR){
+      sASR.textContent = '当前浏览器不支持 Web Speech → 模拟识别：「请思考一下，然后看前方」';
+      onASR('请思考一下，然后看前方', true);
+      return;
+    }
+    try{
+      if(recog){ try{ recog.stop(); }catch(_){} }
+      recog = new SR();
+      recog.lang = 'zh-CN';
+      recog.interimResults = true;
+      recog.continuous = false;
+      let finalText = '';
+      recog.onstart = ()=> { sASR.textContent = '🎙 正在听（Web Speech）…'; };
+      recog.onresult = (e)=>{
+        let interim = '';
+        for(let i = e.resultIndex; i < e.results.length; i++){
+          const r = e.results[i];
+          if(r.isFinal) finalText += r[0].transcript;
+          else interim += r[0].transcript;
+        }
+        sASR.textContent = (finalText ? finalText : '') + (interim ? ' （草稿）'+interim : '') || '🎙 识别中…';
+      };
+      recog.onerror = (e)=>{
+        sASR.textContent = '⚠ 识别失败：' + (e.error || '未知') + ' → 回退模拟';
+        onASR('你好，棒极了，看右前方', true);
+      };
+      recog.onend = ()=>{ if(finalText) onASR(finalText); };
+      recog.start();
+    }catch(err){ sASR.textContent = '启动失败：' + err.message; }
+  });
+  document.getElementById('btnStop').addEventListener('click', ()=>{
+    if(recog){ try{ recog.stop(); }catch(_){} recog=null; }
+    sASR.textContent = '已停止监听';
+  });
+
+  function onASR(text, simulated){
+    sASR.textContent = (simulated?'[模拟] ':'') + '识别结果："' + text + '"';
+    const eid = textToEmotionId(text);
+    // 使用 SDK 官方接口：AI 对接只要一个 emotionId
+    handleAIMessage({ emotionId: eid, tips: text });
+    // 方向关键词判定（保留你要的「方向朝这个方向摆」）
+    const keyDeg = keywordToDeg(text);
+    if(keyDeg != null) triggerByDeg(keyDeg);
+    else flashRipple();
+  }
+  function keywordToDeg(t){
+    if(/(前面|前方|正北|上边|上面|正前方)/.test(t)) return 0;
+    if(/(东北|右上|右前方上)/.test(t)) return 45;
+    if(/(右边|东侧|正东|右侧)/.test(t)) return 90;
+    if(/(东南|右下|右后方上)/.test(t)) return 135;
+    if(/(后面|背后|正南|下边|下面|正后方)/.test(t)) return 180;
+    if(/(西南|左下|左后方)/.test(t)) return 225;
+    if(/(左边|西侧|正西|左侧)/.test(t)) return 270;
+    if(/(西北|左上|左前方)/.test(t)) return 315;
+    return null;
+  }
+
+  /* 窗口尺寸变化 → 按当前角度重新计算偏移（throttle 30ms，避免拖拽窗口时高频触发重排） */
+  let _rzTimer = 0;
+  window.addEventListener('resize', ()=>{
+    if(_rzTimer) return;
+    _rzTimer = setTimeout(()=>{
+      _rzTimer = 0;
+      const cur = sDeg.textContent;
+      if(cur && cur.endsWith('°')) setDirection(parseInt(cur, 10));
+    }, 30);
+  });
+
+  /* ——— 首次渲染：档位 → Tab → 缩略快照 → 列表 → 默认表情 ——— */
+  renderPerfBar();
+  renderTabs();
+  // 先画一轮 fallback 缩略图（ID 色球），保证页面不空白
+  if(EMOTIONS.length){
+    for(const e of EMOTIONS){
+      if(!thumbCache.has(e.id)) thumbCache.set(e.id, fallbackThumbSVG(e.id));
+    }
+  }
+  renderList();
+  const sEmoTpl = sEmo.textContent;
+  if(EMOTIONS.length){
+    setEmotionById('10', 'silent');
+    sEmo.textContent = sEmo.textContent + ` · 共 ${EMOTIONS.length} 种表情`;
+  }
+  // 异步生成真实缩略图（离屏快照，不影响主球首帧）
+  const ts = document.getElementById('thumbStatus');
+  buildThumbCache(
+    (cur, total)=>{ if(ts) ts.textContent = `📦 缩略图快照生成中… ${cur}/${total}（只在首次加载生成 1 次）`; },
+    ()=>{
+      if(ts) ts.textContent = `✅ ${EMOTIONS.length} 个缩略图已转成静态缓存（主线程 0 rAF）。现在主球动画应该明显丝滑了 🎉`;
+      renderList();
+    }
+  );
+</script>
+</body>
+</html>
